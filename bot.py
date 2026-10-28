@@ -675,25 +675,31 @@ async def on_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- Daily suggestion ----------------
+_suggestion_lock = asyncio.Lock()
+
+
 async def send_due_suggestions(bot, now=None):
     """Send today's menu to every chat whose time has come. Each chat gets it once a day."""
-    now = now or datetime.now(TZ)
-    day = now.date()
-    sent = 0
-    for r in chats_due(day):
-        if now.strftime("%H:%M") < r["suggest_at"]:
-            continue
-        chat_id = r["chat_id"]
-        save_settings(chat_id, last_sent=day.isoformat())
-        text, markup = suggestion_message(chat_id, day)
-        if markup is None:
-            continue  # no dishes yet, don't bother the chat
-        try:
-            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    async with _suggestion_lock:
+        now = now or datetime.now(TZ)
+        day = now.date()
+        sent = 0
+        for r in chats_due(day):
+            if now.strftime("%H:%M") < r["suggest_at"]:
+                continue
+            chat_id = r["chat_id"]
+            text, markup = suggestion_message(chat_id, day)
+            if markup is None:
+                save_settings(chat_id, last_sent=day.isoformat())
+                continue  # no dishes yet, don't bother the chat
+            try:
+                await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except Exception as e:  # bot removed from group, etc.
+                log.warning("Could not send suggestion to %s: %s", chat_id, e)
+                continue
             sent += 1
-        except Exception as e:  # bot removed from group, etc.
-            log.warning("Could not send suggestion to %s: %s", chat_id, e)
-    return sent
+            save_settings(chat_id, last_sent=day.isoformat())
+        return sent
 
 
 async def suggestion_job(context: ContextTypes.DEFAULT_TYPE):

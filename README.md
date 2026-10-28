@@ -50,7 +50,8 @@ python bot.py
 ## 4. ដាក់ online
 ធ្វើដូច README របស់ payment-bot ដែរ (Render + Neon + cron-job.org) ដោយមានភាពខុសគ្នាដូចខាងក្រោម:
 - **Neon:** អាចប្រើ database តែមួយជាមួយ payment-bot បាន ព្រោះតារាងទាំងអស់មានឈ្មោះចាប់ផ្តើមដោយ `menu_` ដូច្នេះមិនជាន់គ្នាទេ។
-- **cron-job.org:** ត្រូវការតែ job "Keep awake" (`https://<app>/` រៀងរាល់ ១០ នាទី) ប៉ុណ្ណោះ។ (ជម្រើស) អាចបន្ថែម `https://<app>/cron/suggest?key=CRON_SECRET` រៀងរាល់ ៥ នាទីផងដែរ។
+- **Render Free:** សេវាអាច sleep ពេលគ្មាន request។ Job កំណត់ពេលក្នុង bot ដំណើរការតែពេលសេវាកំពុងរត់ ដូច្នេះកុំអាស្រ័យលើវាតែឯង។
+- **cron-job.org:** កំណត់ `CRON_SECRET` ក្នុង Render ជាពាក្យសម្ងាត់វែង និងចៃដន្យ (ប្រើអក្សរ លេខ `-` ឬ `_` ដើម្បីងាយដាក់ក្នុង URL)។ បង្កើត job ប្រភេទ GET ទៅ `https://<app>/cron/suggest?key=<CRON_SECRET>` រៀងរាល់ ៥ នាទី ដើម្បី wake សេវា ហើយឲ្យវាផ្ញើម្ហូបដែលដល់ម៉ោង។ កំណត់ job នេះឲ្យដំណើរការជានិច្ច; job "Keep awake" (`https://<app>/` រៀងរាល់ ១០ នាទី) អាចប្រើបន្ថែមបាន ប៉ុន្តែមិនជំនួស job `/cron/suggest` ទេ។
 - ⚠️ **Render Free** ផ្តល់ 750 ម៉ោង/ខែ ដែលគ្រាន់សម្រាប់ app **តែមួយ** ដែលបើករហូត។ ប្រសិនបើ payment-bot កំពុងដំណើរការលើ Render រួចហើយ ត្រូវប្រើគណនី Render ទីពីរ សម្រាប់ bot នេះ។
 
 ## ការកំណត់ (Environment variables)
