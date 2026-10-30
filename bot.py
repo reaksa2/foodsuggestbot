@@ -2,7 +2,7 @@
 Telegram Dinner Menu Bot
 ------------------------
 Keep a list of dishes sorted into categories (soup, stir-fry, fried/grilled, ...)
-and get a dinner suggestion every evening: one dish from each chosen category.
+and get one random dinner suggestion from one chosen category every evening.
 
 Buttons:
   🎲 ណែនាំម្ហូប   - today's suggestion (🔄 to change a dish, ✅ to accept)
@@ -293,11 +293,29 @@ def save_suggestion(chat_id, day, category_id, dish_id):
         (chat_id, day.isoformat(), category_id, dish_id))
 
 
+def save_daily_suggestion(chat_id, day, category_id, dish_id):
+    save_suggestion(chat_id, day, category_id, dish_id)
+    run(
+        "DELETE FROM menu_suggestions WHERE chat_id=? AND day=? AND category_id<>?",
+        (chat_id, day.isoformat(), category_id),
+    )
+
+
 def recently_suggested(chat_id, day):
     """Dish ids suggested in the REPEAT_DAYS days before `day`."""
     rows = run("SELECT dish_id FROM menu_suggestions WHERE chat_id=? AND day>=? AND day<?",
                (chat_id, (day - timedelta(days=REPEAT_DAYS)).isoformat(), day.isoformat()), fetch="all")
     return {r["dish_id"] for r in rows}
+
+
+def last_suggested_category(chat_id, day):
+    row = run(
+        "SELECT category_id FROM menu_suggestions WHERE chat_id=? AND day<? "
+        "ORDER BY day DESC, category_id LIMIT 1",
+        (chat_id, day.isoformat()),
+        fetch="one",
+    )
+    return row["category_id"] if row else None
 
 
 def chats_due(day):
@@ -318,26 +336,43 @@ def pick(options, recent, avoid=None):
 
 
 def suggestion(chat_id, day, reroll=None):
-    """[(category, dish)] for the day: one dish per daily category that has dishes.
-    The pick is saved, so tapping 🎲 again shows the same menu.
-    reroll = a category id to change that dish, or 'all' to change every dish."""
+    """Return one saved (category, dish) pair for the day, chosen at random.
+    Prefer a different category from the previous suggestion when possible."""
     current = day_suggestion(chat_id, day)
     recent = recently_suggested(chat_id, day)
     by_cat = defaultdict(list)
     for d in dishes(chat_id):
         by_cat[d["category_id"]].append(d)
 
-    menu = []
-    for c in categories(chat_id):
-        options = by_cat.get(c["id"])
-        if not c["daily"] or not options:
-            continue
-        chosen = next((d for d in options if d["id"] == current.get(c["id"])), None)
-        if chosen is None or reroll in ("all", c["id"]):
-            chosen = pick(options, recent, avoid=chosen["id"] if chosen else None)
-            save_suggestion(chat_id, day, c["id"], chosen["id"])
-        menu.append((c, chosen))
-    return menu
+    available = [(c, by_cat[c["id"]]) for c in categories(chat_id)
+                 if c["daily"] and by_cat.get(c["id"])]
+    if not available:
+        return []
+
+    saved = next(
+        ((c, d) for c, options in available for d in options
+         if current.get(c["id"]) == d["id"]),
+        None,
+    )
+    if saved is not None and reroll is None:
+        if len(current) != 1:
+            save_daily_suggestion(chat_id, day, saved[0]["id"], saved[1]["id"])
+        return [saved]
+
+    previous_category = last_suggested_category(chat_id, day)
+    avoid_category = saved[0]["id"] if saved else None
+    preferred = [(c, options) for c, options in available
+                 if c["id"] not in (previous_category, avoid_category)]
+    if not preferred:
+        preferred = [(c, options) for c, options in available if c["id"] != avoid_category]
+    if not preferred:
+        preferred = available
+
+    chosen_category, options = random.choice(preferred)
+    avoid_dish = saved[1]["id"] if saved and saved[0]["id"] == chosen_category["id"] else None
+    chosen_dish = pick(options, recent, avoid=avoid_dish)
+    save_daily_suggestion(chat_id, day, chosen_category["id"], chosen_dish["id"])
+    return [(chosen_category, chosen_dish)]
 
 
 def suggestion_message(chat_id, day, reroll=None):
@@ -352,13 +387,11 @@ def suggestion_message(chat_id, day, reroll=None):
     lines = [f"🍽 <b>ម្ហូបល្ងាចនេះ – {kh_date(day)}</b>", ""]
     for c, d in menu:
         lines.append(f"{html.escape(c['name'])}: <b>{html.escape(d['name'])}</b>")
-    lines += ["", "🔄 ចុចដើម្បីប្តូរម្ហូបណាមួយ ឬ ✅ បើយល់ព្រម"]
-    change = [InlineKeyboardButton(f"🔄 {c['name']}", callback_data=f"re:{c['id']}") for c, _ in menu]
-    rows = [change[i:i + 2] for i in range(0, len(change), 2)]
-    rows.append([
-        InlineKeyboardButton("🔄 ប្តូរទាំងអស់", callback_data="re:0"),
+    lines += ["", "🔄 ចុចដើម្បីចៃដន្យម្ហូបមួយទៀត ឬ ✅ បើយល់ព្រម"]
+    rows = [[
+        InlineKeyboardButton("🔄 ចៃដន្យម្ហូបមួយទៀត", callback_data="re:0"),
         InlineKeyboardButton("✅ យល់ព្រម", callback_data="ok:0"),
-    ])
+    ]]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -622,9 +655,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"🗑 បានលុប {row['name']}")
         await edit(query, *category_view(chat_id, row["category_id"]))
 
-    elif action == "re":  # change one dish (category id) or all (0) in today's menu
+    elif action == "re":  # choose a different random dish for today's suggestion
         await query.answer("🔄")
-        await edit(query, *suggestion_message(chat_id, today(), reroll="all" if arg == 0 else arg))
+        await edit(query, *suggestion_message(chat_id, today(), reroll="all"))
 
     elif action == "ok":  # menu accepted: keep the text, remove the buttons
         await query.answer("😋")
