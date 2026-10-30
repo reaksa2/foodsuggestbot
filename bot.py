@@ -73,14 +73,15 @@ WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "
 PORT = int(os.getenv("PORT", "10000"))
 CRON_SECRET = os.getenv("CRON_SECRET", "")  # protects the /cron/suggest address
 
-# Categories every new chat starts with: (name, in the daily suggestion?)
+# Categories every new chat starts with: (name, enabled for suggestions?)
 DEFAULT_CATEGORIES = [
     ("🍲 សម្ល", True),
     ("🥘 ឆា", True),
     ("🍗 ចៀន/អាំង", True),
-    ("🥗 ញាំ/បន្លែ", False),
-    ("🍮 បង្អែម", False),
+    ("🥗 ញាំ/បន្លែ", True),
+    ("🍮 បង្អែម", True),
 ]
+DESSERT_MARKER = "បង្អែម"
 SAMPLE_DISHES = {
     "🍲 សម្ល": ["សម្លកកូរ", "សម្លម្ជូរគ្រឿង", "សម្លម្ជូរយួន", "ស្ងោរជ្រក់", "សម្លការី"],
     "🥘 ឆា": ["ឆាក្ដៅ", "ឆាត្រកួន", "ឆាសណ្ដែកកួរ", "ឆាខ្ញី", "ឆាផ្កាខាត់ណា"],
@@ -293,12 +294,10 @@ def save_suggestion(chat_id, day, category_id, dish_id):
         (chat_id, day.isoformat(), category_id, dish_id))
 
 
-def save_daily_suggestion(chat_id, day, category_id, dish_id):
-    save_suggestion(chat_id, day, category_id, dish_id)
-    run(
-        "DELETE FROM menu_suggestions WHERE chat_id=? AND day=? AND category_id<>?",
-        (chat_id, day.isoformat(), category_id),
-    )
+def save_daily_suggestions(chat_id, day, menu):
+    run("DELETE FROM menu_suggestions WHERE chat_id=? AND day=?", (chat_id, day.isoformat()))
+    for c, d in menu:
+        save_suggestion(chat_id, day, c["id"], d["id"])
 
 
 def recently_suggested(chat_id, day):
@@ -308,14 +307,27 @@ def recently_suggested(chat_id, day):
     return {r["dish_id"] for r in rows}
 
 
-def last_suggested_category(chat_id, day):
+def last_suggested_category(chat_id, day, category_ids):
+    if not category_ids:
+        return None
+    placeholders = ", ".join("?" for _ in category_ids)
     row = run(
         "SELECT category_id FROM menu_suggestions WHERE chat_id=? AND day<? "
-        "ORDER BY day DESC, category_id LIMIT 1",
-        (chat_id, day.isoformat()),
+        f"AND category_id IN ({placeholders}) ORDER BY day DESC LIMIT 1",
+        (chat_id, day.isoformat(), *category_ids),
         fetch="one",
     )
     return row["category_id"] if row else None
+
+
+def dessert_day(chat_id, day):
+    """Choose the same two pseudo-random dessert days for each chat every week."""
+    week_start = day - timedelta(days=day.weekday())
+    scores = [
+        hashlib.sha256(f"{chat_id}:{week_start.isoformat()}:{weekday}".encode()).digest()
+        for weekday in range(7)
+    ]
+    return day.weekday() in sorted(range(7), key=scores.__getitem__)[:2]
 
 
 def chats_due(day):
@@ -336,43 +348,61 @@ def pick(options, recent, avoid=None):
 
 
 def suggestion(chat_id, day, reroll=None):
-    """Return one saved (category, dish) pair for the day, chosen at random.
-    Prefer a different category from the previous suggestion when possible."""
+    """Return one main dish and, on scheduled days, an optional dessert."""
     current = day_suggestion(chat_id, day)
     recent = recently_suggested(chat_id, day)
     by_cat = defaultdict(list)
     for d in dishes(chat_id):
         by_cat[d["category_id"]].append(d)
 
-    available = [(c, by_cat[c["id"]]) for c in categories(chat_id)
-                 if c["daily"] and by_cat.get(c["id"])]
-    if not available:
+    enabled = [(c, by_cat[c["id"]]) for c in categories(chat_id)
+               if c["daily"] and by_cat.get(c["id"])]
+    main_options = [(c, options) for c, options in enabled
+                    if DESSERT_MARKER not in c["name"]]
+    dessert_options = [(c, options) for c, options in enabled
+                       if DESSERT_MARKER in c["name"]]
+    if not main_options:
         return []
 
-    saved = next(
-        ((c, d) for c, options in available for d in options
+    saved_main = next(
+        ((c, d) for c, options in main_options for d in options
          if current.get(c["id"]) == d["id"]),
         None,
     )
-    if saved is not None and reroll is None:
-        if len(current) != 1:
-            save_daily_suggestion(chat_id, day, saved[0]["id"], saved[1]["id"])
-        return [saved]
+    if saved_main is not None and reroll is None:
+        main = saved_main
+    else:
+        main_ids = [c["id"] for c, _ in main_options]
+        previous_category = last_suggested_category(chat_id, day, main_ids)
+        avoid_category = saved_main[0]["id"] if saved_main else None
+        preferred = [(c, options) for c, options in main_options
+                     if c["id"] not in (previous_category, avoid_category)]
+        if not preferred:
+            preferred = [(c, options) for c, options in main_options
+                         if c["id"] != avoid_category]
+        if not preferred:
+            preferred = main_options
+        chosen_category, options = random.choice(preferred)
+        avoid_dish = saved_main[1]["id"] if saved_main and saved_main[0]["id"] == chosen_category["id"] else None
+        main = (chosen_category, pick(options, recent, avoid=avoid_dish))
 
-    previous_category = last_suggested_category(chat_id, day)
-    avoid_category = saved[0]["id"] if saved else None
-    preferred = [(c, options) for c, options in available
-                 if c["id"] not in (previous_category, avoid_category)]
-    if not preferred:
-        preferred = [(c, options) for c, options in available if c["id"] != avoid_category]
-    if not preferred:
-        preferred = available
+    menu = [main]
+    if dessert_options and dessert_day(chat_id, day):
+        saved_dessert = next(
+            ((c, d) for c, options in dessert_options for d in options
+             if current.get(c["id"]) == d["id"]),
+            None,
+        )
+        if saved_dessert is not None and reroll is None:
+            menu.append(saved_dessert)
+        else:
+            dessert_category, options = random.choice(dessert_options)
+            avoid_dish = saved_dessert[1]["id"] if saved_dessert and saved_dessert[0]["id"] == dessert_category["id"] else None
+            menu.append((dessert_category, pick(options, recent, avoid=avoid_dish)))
 
-    chosen_category, options = random.choice(preferred)
-    avoid_dish = saved[1]["id"] if saved and saved[0]["id"] == chosen_category["id"] else None
-    chosen_dish = pick(options, recent, avoid=avoid_dish)
-    save_daily_suggestion(chat_id, day, chosen_category["id"], chosen_dish["id"])
-    return [(chosen_category, chosen_dish)]
+    if {c["id"]: d["id"] for c, d in menu} != current:
+        save_daily_suggestions(chat_id, day, menu)
+    return menu
 
 
 def suggestion_message(chat_id, day, reroll=None):
@@ -445,7 +475,7 @@ def settings_view(chat_id):
         f"⏰ ណែនាំម្ហូប: {when}\n"
         "   /time 18:00 ដើម្បីប្តូរម៉ោង, /time off ដើម្បីបិទ\n\n"
         "📂 <b>ប្រភេទម្ហូប</b>\n"
-        "   ✅ = ដាក់ក្នុងការណែនាំរាល់ល្ងាច, ⬜ = មិនដាក់ (ចុចដើម្បីប្តូរ)\n"
+        "   ✅ = អាចណែនាំ (ចុចដើម្បីប្តូរ); បង្អែមដែលមាន ✅ នឹងបន្ថែមចៃដន្យ ២ថ្ងៃ/សប្តាហ៍\n"
         "   /addcat 🐟 ត្រី ដើម្បីបន្ថែមប្រភេទថ្មី"
     )
     counts = defaultdict(int)
